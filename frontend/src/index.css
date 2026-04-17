@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+@theme {
+  /* Cores de Fundo */
+  --color-ui-bg: #0f0f0f;
+  --color-panel-bg: #1c1c1c;
+  
+  /* Cores de Texto */
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #a1a1a1;
+  
+  /* Cores de Acento e Estado */
+  --color-accent: #d97757;
+  --color-success: #4caf50;
+  --color-terminal: #0088cc;
+}
+
+@layer base {
+  body {
+    @apply bg-ui-bg text-text-primary font-sans antialiased m-0 p-0 overflow-hidden;
+  }
+}

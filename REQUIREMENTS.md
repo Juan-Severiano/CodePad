@@ -1,4 +1,4 @@
-# 🚀 Project: OpenAgent Desktop (Claude Code Clone)
+# 🚀 Project: CodePad (Claude Code Clone)
 
 ## 1. Visão Geral
 Um centro de comando de agentes autônomos para desktop, focado em performance e controle visual de múltiplos provedores (Claude, Gemini, Codex). O objetivo é ser um orquestrador de tarefas de engenharia de software que atua diretamente no sistema de arquivos do usuário.
