@@ -1,0 +1,171 @@
+package auth
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+)
+
+const (
+	clientID              = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	claudeAuthorizeURL    = "https://claude.com/cai/oauth/authorize"
+	anthropicTokenURL     = "https://platform.claude.com/v1/oauth/token"
+	anthropicCreateKeyURL = "https://api.anthropic.com/api/oauth/claude_cli/create_api_key"
+)
+
+func generateRandomString(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func PerformClaudeOAuth(ctx context.Context) (string, error) {
+	// 1. Generate PKCE values
+	codeVerifier := generateRandomString(32)
+	hash := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
+	state := generateRandomString(32) // Must be 32 bytes to match openclaude
+
+	// 2. Start local listener
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	defer listener.Close()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
+
+	// 3. Build Auth URL
+	u, _ := url.Parse(claudeAuthorizeURL)
+	q := u.Query()
+	q.Set("client_id", clientID)
+	q.Set("response_type", "code")
+	q.Set("redirect_uri", redirectURI)
+	q.Set("scope", "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload")
+	q.Set("code_challenge", codeChallenge)
+	q.Set("code_challenge_method", "S256")
+	q.Set("state", state)
+	q.Set("code", "true")
+	u.RawQuery = q.Encode()
+
+	codeChan := make(chan string, 1)
+	errChan := make(chan error, 1)
+
+	// Setup mux
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if qState := query.Get("state"); qState != state {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Invalid state"))
+			errChan <- fmt.Errorf("invalid state returned from oauth provider")
+			return
+		}
+		if code := query.Get("code"); code != "" {
+			w.Write([]byte(`<html><body style="font-family: sans-serif; text-align: center; margin-top: 50px;"><h2>Login successful!</h2><p>You can close this window and return to CodePad.</p><script>setTimeout(window.close, 3000)</script></body></html>`))
+			codeChan <- code
+			return
+		}
+		if errorMsg := query.Get("error"); errorMsg != "" {
+			desc := query.Get("error_description")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(fmt.Sprintf("OAuth error: %s - %s", errorMsg, desc)))
+			errChan <- fmt.Errorf("oauth error: %s - %s", errorMsg, desc)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Missing code"))
+		errChan <- fmt.Errorf("missing code in callback")
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+
+	// 4. Open Browser
+	runtime.BrowserOpenURL(ctx, u.String())
+
+	// 5. Wait for callback
+	var authCode string
+	select {
+	case authCode = <-codeChan:
+	case err := <-errChan:
+		fmt.Println("[OAuth Error] Waiting for callback:", err)
+		return "", err
+	case <-time.After(5 * time.Minute):
+		return "", fmt.Errorf("oauth login timed out")
+	}
+
+	// 6. Exchange code for access token
+	fmt.Println("[OAuth] Received callback with code, starting token exchange...")
+	tokenData := map[string]string{
+		"grant_type":    "authorization_code",
+		"code":          authCode,
+		"redirect_uri":  redirectURI,
+		"client_id":     clientID,
+		"code_verifier": codeVerifier,
+		"state":         state,
+	}
+	bodyBytes, _ := json.Marshal(tokenData)
+	resp, err := http.Post(anthropicTokenURL, "application/json", bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		fmt.Println("[OAuth Error] Token exchange request failed:", err)
+		return "", fmt.Errorf("failed to exchange token: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		fmt.Printf("[OAuth Error] Token exchange failed (%d): %s\n", resp.StatusCode, string(raw))
+		return "", fmt.Errorf("token exchange failed: %d %s", resp.StatusCode, string(raw))
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		fmt.Println("[OAuth Error] Failed to decode token resp:", err)
+		return "", err
+	}
+
+	// 7. Request API Key
+	req, _ := http.NewRequest("POST", anthropicCreateKeyURL, bytes.NewBuffer([]byte("{}")))
+	req.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	keyResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Println("[OAuth] Create API key request failed:", err)
+		return "", fmt.Errorf("failed to create api key: %v", err)
+	}
+	defer keyResp.Body.Close()
+
+	if keyResp.StatusCode != 200 {
+		raw, _ := io.ReadAll(keyResp.Body)
+		fmt.Printf("[OAuth] API key creation failed (%d): %s\n", keyResp.StatusCode, string(raw))
+		return "", fmt.Errorf("api key creation failed: %d %s", keyResp.StatusCode, string(raw))
+	}
+
+	var keyData struct {
+		RawKey string `json:"raw_key"`
+	}
+	if err := json.NewDecoder(keyResp.Body).Decode(&keyData); err != nil {
+		fmt.Println("[OAuth] Failed to decode API key response:", err)
+		return "", err
+	}
+
+	fmt.Println("[OAuth] API key created successfully! Returning key...")
+	return keyData.RawKey, nil
+}

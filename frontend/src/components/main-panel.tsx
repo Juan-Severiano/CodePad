@@ -1,89 +1,153 @@
 import React from 'react';
 import { CommandBar } from './command-bar';
 import { useAppStore } from '../store/app-store';
-import { Plus, FolderOpen, Zap, GitBranch } from 'lucide-react';
 import { ChatView } from './chat-view';
-import { NewSessionDialog } from './new-session-dialog';
 
 export function MainPanel() {
-  const { activeProject, activeSession, openNewSessionDialog } = useAppStore();
+  const {
+    activeProject,
+    activeSession,
+    createProjectFromDir,
+    createSession,
+    detectGitBranch,
+    selectedModel,
+    resetToWelcome,
+  } = useAppStore();
+
+  const handleOpenFolder = async () => {
+    const app = (window as any).go?.main?.App;
+    if (!app) return;
+    const path = await app.PickDirectory();
+    if (!path) return;
+    const project = await createProjectFromDir(path);
+    if (!project) return;
+    const now = new Date();
+    const title = now.toLocaleString('pt-BR', {
+      month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit',
+    });
+    await createSession(project.id, title, selectedModel);
+    detectGitBranch(path);
+  };
 
   return (
-    <div className="flex-1 bg-[#0f0f0f] h-full flex flex-col relative overflow-hidden">
-      <NewSessionDialog />
-
+    <div style={{ flex: 1, background: '#0f0f0f', height: '100%', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
       {/* Content */}
-      <div className="flex-1 overflow-y-auto pb-36">
+      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {!activeProject ? (
-          <WelcomeScreen onCreateProject={openNewSessionDialog} />
+          <WelcomeScreen onOpenFolder={handleOpenFolder} />
         ) : !activeSession ? (
-          <NoSessionScreen onCreateSession={openNewSessionDialog} projectName={activeProject.name} />
+          <NoSessionScreen onOpenFolder={handleOpenFolder} projectName={activeProject.name} />
         ) : (
-          <div className="p-8 max-w-3xl mx-auto w-full">
-            <ChatView />
-          </div>
+          <ChatView />
         )}
       </div>
 
-      {/* Command Bar */}
-      <div className="absolute bottom-0 left-0 right-0 px-6 pt-10 pb-4 bg-gradient-to-t from-[#0f0f0f] via-[#0f0f0f]/95 to-transparent pointer-events-none">
-        <div className="pointer-events-auto max-w-3xl mx-auto">
-          <CommandBar />
-        </div>
+      {/* Command Bar — absolute over gradient */}
+      <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+        <CommandBar />
       </div>
     </div>
   );
 }
 
-function WelcomeScreen({ onCreateProject }: { onCreateProject: () => void }) {
+// ─── WelcomeScreen ────────────────────────────────────────────────────────────
+
+const FEATURES = [
+  {
+    iconPath: 'M2 7s1.5-5 5-5 5 5 5 5-1.5 5-5 5-5-5-5-5zm5 0a1.5 1.5 0 100 0.01',
+    label: 'Streaming agents',
+    desc: 'Real-time tool calls and diffs',
+  },
+  {
+    iconPath: 'M2 3h10v2H2zm0 4h10v2H2zm0 4h6v2H2z',
+    label: 'Project context',
+    desc: 'Reads your codebase automatically',
+  },
+  {
+    iconPath: 'M7 2a5 5 0 000 10M7 2c1.5 3 1.5 7 0 10M2 7h10M2.5 4.5C4 5.5 5.5 6 7 6s3-.5 4.5-1.5M2.5 9.5C4 8.5 5.5 8 7 8s3 .5 4.5 1.5',
+    label: 'Branch detection',
+    desc: 'Aware of your git context',
+  },
+];
+
+function WelcomeScreen({ onOpenFolder }: { onOpenFolder: () => void }) {
   return (
-    <div className="h-full flex flex-col items-center justify-center gap-10 px-8">
-      <div className="text-center flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold text-white tracking-tight">What would you like to work on?</h1>
-        <p className="text-[#666] text-sm">Open a folder to start a new project</p>
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+      justifyContent: 'center', padding: '40px 48px 200px',
+    }}>
+      <div style={{ fontSize: 24, fontWeight: 600, color: '#e8e8e8', marginBottom: 10, letterSpacing: -0.3 }}>
+        What would you like to work on?
+      </div>
+      <div style={{ fontSize: 14, color: '#555', marginBottom: 40 }}>
+        Open a folder to start a new project
       </div>
 
       <button
-        onClick={onCreateProject}
-        className="flex items-center gap-2.5 px-5 py-3 bg-[#1c1c1c] hover:bg-[#252525] border border-[#2a2a2a] hover:border-[#3a3a3a] text-white rounded-lg font-medium text-sm transition-all"
+        onClick={onOpenFolder}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: '#1c1c1c', border: '1px solid #2e2e2e', borderRadius: 10,
+          padding: '10px 22px', color: '#ccc', fontSize: 13.5, cursor: 'pointer',
+          transition: 'background 0.15s, border-color 0.15s',
+          marginBottom: 56,
+        }}
+        onMouseEnter={e => { e.currentTarget.style.background = '#242424'; e.currentTarget.style.borderColor = '#3a3a3a'; }}
+        onMouseLeave={e => { e.currentTarget.style.background = '#1c1c1c'; e.currentTarget.style.borderColor = '#2e2e2e'; }}
       >
-        <FolderOpen size={16} className="text-[#888]" />
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2 4.5h4l1.5 2h6v7H2V4.5z" /><path d="M2 4.5V2.5h3.5" />
+        </svg>
         Open folder
       </button>
 
-      <div className="grid grid-cols-3 gap-3 max-w-xl w-full mt-4">
-        <FeatureCard icon={<Zap size={15} />} title="Streaming agents" description="Multiple AI providers with real-time output" />
-        <FeatureCard icon={<FolderOpen size={15} />} title="Project context" description="Git-aware with worktree support" />
-        <FeatureCard icon={<GitBranch size={15} />} title="Branch detection" description="Auto-detects repo and branch" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, maxWidth: 580, width: '100%' }}>
+        {FEATURES.map(f => (
+          <div key={f.label} style={{
+            background: '#141414', border: '1px solid #1e1e1e', borderRadius: 10,
+            padding: '16px 16px',
+          }}>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#555" strokeWidth="1.3" strokeLinecap="round" style={{ marginBottom: 10 }}>
+              <path d={f.iconPath} />
+            </svg>
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: '#aaa', marginBottom: 4 }}>{f.label}</div>
+            <div style={{ fontSize: 11.5, color: '#4a4a4a', lineHeight: 1.5 }}>{f.desc}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
-function NoSessionScreen({ onCreateSession, projectName }: { onCreateSession: () => void; projectName: string }) {
+// ─── NoSessionScreen ──────────────────────────────────────────────────────────
+
+function NoSessionScreen({ onOpenFolder, projectName }: { onOpenFolder: () => void; projectName: string }) {
   return (
-    <div className="h-full flex flex-col items-center justify-center gap-6 px-8">
-      <div className="text-center flex flex-col gap-2">
-        <p className="text-[#666] text-sm font-mono">{projectName}</p>
-        <h2 className="text-xl font-semibold text-white">Start a new session</h2>
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+      justifyContent: 'center', padding: '40px 48px 200px',
+    }}>
+      <div style={{ textAlign: 'center', marginBottom: 24 }}>
+        <p style={{ fontFamily: 'monospace', fontSize: 12, color: '#555', marginBottom: 8 }}>{projectName}</p>
+        <h2 style={{ fontSize: 20, fontWeight: 600, color: '#e8e8e8' }}>Start a new session</h2>
       </div>
       <button
-        onClick={onCreateSession}
-        className="flex items-center gap-2 px-4 py-2.5 bg-[#1c1c1c] hover:bg-[#252525] border border-[#2a2a2a] text-white rounded-lg text-sm transition-all"
+        onClick={onOpenFolder}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: '#1c1c1c', border: '1px solid #2e2e2e', borderRadius: 10,
+          padding: '10px 22px', color: '#ccc', fontSize: 13.5, cursor: 'pointer',
+          transition: 'background 0.15s, border-color 0.15s',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.background = '#242424'; e.currentTarget.style.borderColor = '#3a3a3a'; }}
+        onMouseLeave={e => { e.currentTarget.style.background = '#1c1c1c'; e.currentTarget.style.borderColor = '#2e2e2e'; }}
       >
-        <Plus size={14} />
-        New session
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2 4.5h4l1.5 2h6v7H2V4.5z" /><path d="M2 4.5V2.5h3.5" />
+        </svg>
+        Open folder
       </button>
-    </div>
-  );
-}
-
-function FeatureCard({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }) {
-  return (
-    <div className="bg-[#1c1c1c] border border-[#252525] rounded-lg p-4">
-      <div className="text-[#888] mb-2">{icon}</div>
-      <h3 className="text-white font-medium text-xs mb-1">{title}</h3>
-      <p className="text-[#555] text-[11px] leading-relaxed">{description}</p>
     </div>
   );
 }

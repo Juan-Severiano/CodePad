@@ -35,6 +35,19 @@ export interface AgentEvent {
 
 export type AgentMode = 'auto' | 'accept-edits' | 'ask';
 
+export interface ProviderAuthStatus {
+  configured: boolean;
+  source: 'env' | 'claude-cli' | 'settings' | 'local' | 'none';
+  masked: string;
+  base_url?: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  label: string;
+  provider: string;
+}
+
 interface AppState {
   // Projects & Sessions
   projects: Project[];
@@ -46,11 +59,17 @@ interface AppState {
   chatHistory: AgentEvent[];
   currentTokens: { input: number; output: number };
 
+  // Auth
+  authStatus: Record<string, ProviderAuthStatus> | null;
+
   // Agent Mode & Model
   agentMode: AgentMode;
   selectedModel: string;
+  availableModels: ModelInfo[];
   gitBranch: string;
+  gitBranches: string[];
   recentDirs: string[];
+  attachedImages: string[];
 
   // UI State
   leftSidebarOpen: boolean;
@@ -79,11 +98,24 @@ interface AppState {
   clearChat: () => void;
 
   // Actions - Agent Mode
+  // Auth actions
+  loadAuthStatus: () => Promise<void>;
+  saveProviderKey: (provider: string, key: string) => Promise<void>;
+  testProviderConnection: (provider: string) => Promise<string>;
+
   cycleMode: () => void;
   setAgentMode: (mode: AgentMode) => void;
   setSelectedModel: (model: string) => void;
+  loadAvailableModels: () => Promise<void>;
   loadRecentDirs: () => Promise<void>;
   detectGitBranch: (path: string) => Promise<void>;
+  loadGitBranches: (path: string) => Promise<void>;
+  checkoutBranch: (branch: string) => Promise<void>;
+  createBranch: (branch: string) => Promise<void>;
+  pickDirectory: () => Promise<void>;
+  pickImage: () => Promise<void>;
+  removeImage: (index: number) => void;
+  loginWithClaude: () => Promise<void>;
 
   // Actions - UI
   toggleLeftSidebar: () => void;
@@ -92,6 +124,7 @@ interface AppState {
   toggleSettings: () => void;
   openNewSessionDialog: () => void;
   closeNewSessionDialog: () => void;
+  resetToWelcome: () => void;
 }
 
 const getWailsAPI = () => (window as any).go?.main?.App;
@@ -106,10 +139,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeSession: null,
   chatHistory: [],
   currentTokens: { input: 0, output: 0 },
+  authStatus: null,
   agentMode: 'accept-edits',
   selectedModel: 'claude-sonnet-4-6',
+  availableModels: [],
   gitBranch: '',
+  gitBranches: [],
   recentDirs: [],
+  attachedImages: [],
 
   leftSidebarOpen: true,
   terminalOpen: false,
@@ -310,6 +347,61 @@ export const useAppStore = create<AppState>((set, get) => ({
   setAgentMode: (mode) => set({ agentMode: mode }),
   setSelectedModel: (model) => set({ selectedModel: model }),
 
+  loadAuthStatus: async () => {
+    try {
+      const app = getWailsAPI();
+      if (!app) return;
+      const status = await app.GetAuthStatus();
+      set({ authStatus: status });
+    } catch (error) {
+      console.error('Failed to load auth status', error);
+    }
+  },
+
+  saveProviderKey: async (provider, key) => {
+    try {
+      const app = getWailsAPI();
+      if (!app) return;
+      await app.SaveProviderKey(provider, key);
+      // Refresh auth status and available models
+      await get().loadAuthStatus();
+      await get().loadAvailableModels();
+    } catch (error) {
+      console.error('Failed to save provider key', error);
+      throw error;
+    }
+  },
+
+  testProviderConnection: async (provider) => {
+    try {
+      const app = getWailsAPI();
+      if (!app) return 'error';
+      await app.TestProviderConnection(provider);
+      return 'ok';
+    } catch (error) {
+      return (error as Error).message || 'Connection failed';
+    }
+  },
+
+  loadAvailableModels: async () => {
+    try {
+      const app = getWailsAPI();
+      if (!app) return;
+      const models = await app.GetAvailableModels();
+      if (models && models.length > 0) {
+        set({ availableModels: models });
+        // If the currently selected model isn't in the list, switch to the first available
+        const state = get();
+        const found = models.some((m: ModelInfo) => m.id === state.selectedModel);
+        if (!found) {
+          set({ selectedModel: models[0].id });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load available models', error);
+    }
+  },
+
   loadRecentDirs: async () => {
     try {
       const app = getWailsAPI();
@@ -327,8 +419,94 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!app) return;
       const branch = await app.GetGitBranch(path);
       set({ gitBranch: branch || '' });
+      await get().loadGitBranches(path);
     } catch (error) {
       set({ gitBranch: '' });
+    }
+  },
+
+  loadGitBranches: async (path) => {
+    try {
+      const app = getWailsAPI();
+      if (!app) return;
+      const branches = await app.GetGitBranches(path);
+      set({ gitBranches: branches || [] });
+    } catch (error) {
+      set({ gitBranches: [] });
+    }
+  },
+
+  checkoutBranch: async (branch) => {
+    try {
+      const state = get();
+      if (!state.activeProject) return;
+      const app = getWailsAPI();
+      if (!app) return;
+      await app.CheckoutGitBranch(state.activeProject.working_dir, branch);
+      set({ gitBranch: branch });
+    } catch (error) {
+      console.error("Failed to checkout branch", error);
+    }
+  },
+
+  createBranch: async (branch) => {
+    try {
+      const state = get();
+      if (!state.activeProject) return;
+      const app = getWailsAPI();
+      if (!app) return;
+      await app.CreateGitBranch(state.activeProject.working_dir, branch);
+      set((s) => ({ gitBranch: branch, gitBranches: [...s.gitBranches, branch] }));
+    } catch (error) {
+      console.error("Failed to create branch", error);
+    }
+  },
+
+  pickDirectory: async () => {
+    try {
+      const app = getWailsAPI();
+      if (!app) return;
+      const dir = await app.PickDirectory();
+      if (dir) {
+        await get().createProjectFromDir(dir);
+        const projects = get().projects;
+        const proj = projects.find(p => p.working_dir === dir);
+        if (proj) {
+          get().setActiveProject(proj);
+          get().loadSessions(proj.id);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to pick directory", error);
+    }
+  },
+
+  pickImage: async () => {
+    try {
+      const app = getWailsAPI();
+      if (!app) return;
+      const file = await app.PickImage();
+      if (file) {
+        set((state) => ({ attachedImages: [...state.attachedImages, file] }));
+      }
+    } catch (error) {
+      console.error("Failed to pick image", error);
+    }
+  },
+
+  removeImage: (index) => set((state) => ({
+    attachedImages: state.attachedImages.filter((_, i) => i !== index)
+  })),
+
+  loginWithClaude: async () => {
+    try {
+      const app = getWailsAPI();
+      if (!app) return;
+      await app.LoginWithClaude();
+      await get().loadAuthStatus();
+    } catch (error) {
+      console.error("Failed to login with Claude", error);
+      alert("Failed to login with Claude:\n" + error);
     }
   },
 
@@ -339,4 +517,5 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
   openNewSessionDialog: () => set({ newSessionDialogOpen: true }),
   closeNewSessionDialog: () => set({ newSessionDialogOpen: false }),
+  resetToWelcome: () => set({ activeProject: null, activeSession: null, chatHistory: [] }),
 }));

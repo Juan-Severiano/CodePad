@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"CodePad/internal/agent"
+	"CodePad/internal/auth"
+	"CodePad/internal/config"
 	"CodePad/internal/cron"
 	"CodePad/internal/git"
 	"CodePad/internal/llm"
@@ -30,11 +32,22 @@ type App struct {
 	sessionStore    *session.Store
 	llmProvider     llm.Provider
 	activeSessions  map[string]context.CancelFunc
+	settings        *config.Settings
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
 	sessionStore, _ := session.NewStore()
+	settings := config.Load()
+
+	// Auth priority: env vars / Claude CLI → settings file
+	anthropicKey, anthropicBaseURL := "", ""
+	if detected := auth.DetectAnthropicAuth(); detected != nil {
+		anthropicKey = detected.APIKey
+		anthropicBaseURL = detected.BaseURL
+	} else if key := settings.GetProviderKey("anthropic"); key != "" {
+		anthropicKey = key
+	}
 
 	a := &App{
 		ptyManager:      pty.NewManager(),
@@ -42,8 +55,9 @@ func NewApp() *App {
 		snapshotManager: memory.NewSnapshotManager(),
 		mcpManager:      mcp.NewClientManager(),
 		sessionStore:    sessionStore,
+		settings:        settings,
 		activeSessions:  make(map[string]context.CancelFunc),
-		llmProvider:     llm.NewAnthropicProvider("", ""), // Will be set from settings
+		llmProvider:     llm.NewAnthropicProviderFull(anthropicKey, anthropicBaseURL, ""),
 	}
 
 	// Injeta a função do Agente no Scheduler para que as rotinas possam acioná-lo
@@ -263,29 +277,138 @@ func (a *App) PickDirectory() (string, error) {
 	return dir, nil
 }
 
+// GetAvailableModels returns models for all configured providers.
+// Ollama is always checked (no key needed).
+func (a *App) GetAvailableModels() []config.ModelInfo {
+	return a.settings.GetAvailableModels()
+}
+
+// GetProviderKeys returns a map of provider -> masked api key (shows last 4 chars).
+func (a *App) GetProviderKeys() map[string]string {
+	result := map[string]string{}
+	for _, provider := range []string{"anthropic", "openai", "gemini", "ollama"} {
+		key := a.settings.GetProviderKey(provider)
+		if key != "" && len(key) > 4 {
+			result[provider] = "••••" + key[len(key)-4:]
+		} else if key != "" {
+			result[provider] = "••••"
+		} else {
+			result[provider] = ""
+		}
+	}
+	return result
+}
+
+// SaveProviderKey saves an API key for a provider and persists to disk.
+// Pass empty string to remove the key.
+func (a *App) SaveProviderKey(provider, apiKey string) error {
+	a.settings.SetProviderKey(provider, apiKey)
+	if err := a.settings.Save(); err != nil {
+		return err
+	}
+	// Hot-reload the Anthropic provider if that key changed
+	if provider == "anthropic" {
+		a.llmProvider = llm.NewAnthropicProvider(apiKey, "")
+	}
+	return nil
+}
+
+// GetAuthStatus returns auth detection results for all providers.
+// Called by the frontend on startup to populate the settings panel.
+func (a *App) GetAuthStatus() map[string]interface{} {
+	result := map[string]interface{}{}
+
+	type providerCheck struct {
+		name    string
+		detect  func() *auth.ProviderAuth
+		settKey string
+	}
+
+	checks := []providerCheck{
+		{"anthropic", auth.DetectAnthropicAuth, "anthropic"},
+		{"openai", auth.DetectOpenAIAuth, "openai"},
+		{"gemini", auth.DetectGeminiAuth, "gemini"},
+	}
+
+	for _, c := range checks {
+		detected := c.detect()
+		if detected != nil {
+			result[c.name] = map[string]interface{}{
+				"configured": true,
+				"source":     string(detected.Source),
+				"masked":     detected.Masked,
+				"base_url":   detected.BaseURL,
+			}
+		} else if key := a.settings.GetProviderKey(c.settKey); key != "" {
+			result[c.name] = map[string]interface{}{
+				"configured": true,
+				"source":     "settings",
+				"masked":     auth.MaskKey(key),
+				"base_url":   "",
+			}
+		} else {
+			result[c.name] = map[string]interface{}{
+				"configured": false,
+				"source":     "none",
+				"masked":     "",
+				"base_url":   "",
+			}
+		}
+	}
+
+	// Ollama — check if server is reachable
+	ollamaModels := a.settings.GetAvailableModels()
+	ollamaRunning := false
+	for _, m := range ollamaModels {
+		if m.Provider == "Ollama" {
+			ollamaRunning = true
+			break
+		}
+	}
+	result["ollama"] = map[string]interface{}{
+		"configured": ollamaRunning,
+		"source":     "local",
+		"masked":     "",
+		"base_url":   "http://localhost:11434",
+	}
+
+	return result
+}
+
+// TestProviderConnection tests the currently configured key for a provider.
+func (a *App) TestProviderConnection(provider string) error {
+	switch provider {
+	case "anthropic":
+		return a.llmProvider.TestConnection()
+	default:
+		return fmt.Errorf("provider %q not supported for connection test yet", provider)
+	}
+}
+
 func (a *App) GetSettings() (map[string]interface{}, error) {
-	// TODO: Implement proper settings loading
+	providers := map[string]interface{}{}
+	for k, v := range a.settings.Providers {
+		providers[k] = map[string]interface{}{
+			"enabled":  v.Enabled,
+			"base_url": v.BaseURL,
+		}
+	}
 	return map[string]interface{}{
-		"providers": map[string]interface{}{
-			"anthropic": map[string]interface{}{
-				"api_key": "",
-				"model":   "claude-3-5-sonnet-20241022",
-			},
-			"openai": map[string]interface{}{
-				"api_key": "",
-				"model":   "gpt-4o",
-			},
-		},
-		"default_model": "claude-3-5-sonnet-20241022",
-		"editor_path":   "code",
-		"theme":         "dark",
+		"providers":     providers,
+		"default_model": a.settings.DefaultModel,
+		"editor_path":   a.settings.EditorPath,
+		"theme":         a.settings.Theme,
 	}, nil
 }
 
 func (a *App) SaveSettings(settings map[string]interface{}) error {
-	// TODO: Implement proper settings saving
-	// Update LLM provider based on settings
-	return nil
+	if model, ok := settings["default_model"].(string); ok {
+		a.settings.DefaultModel = model
+	}
+	if editor, ok := settings["editor_path"].(string); ok {
+		a.settings.EditorPath = editor
+	}
+	return a.settings.Save()
 }
 
 func (a *App) ListDirectory(path string) ([]map[string]interface{}, error) {
@@ -317,6 +440,57 @@ func (a *App) GetGitBranch(path string) (string, error) {
 		return "", nil
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (a *App) GetGitBranches(path string) ([]string, error) {
+	cmd := exec.Command("git", "-C", path, "branch", "--format=%(refname:short)")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var branches []string
+	for _, b := range strings.Split(string(out), "\n") {
+		b = strings.TrimSpace(b)
+		if b != "" {
+			branches = append(branches, b)
+		}
+	}
+	return branches, nil
+}
+
+func (a *App) CheckoutGitBranch(path, branch string) error {
+	cmd := exec.Command("git", "-C", path, "checkout", branch)
+	return cmd.Run()
+}
+
+func (a *App) CreateGitBranch(path, newBranch string) error {
+	cmd := exec.Command("git", "-C", path, "checkout", "-b", newBranch)
+	return cmd.Run()
+}
+
+func (a *App) PickImage() (string, error) {
+	file, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select Image",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Images", Pattern: "*.png;*.jpg;*.jpeg;*.gif;*.webp"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return file, nil
+}
+
+func (a *App) LoginWithClaude() (string, error) {
+	key, err := auth.PerformClaudeOAuth(a.ctx)
+	if err != nil {
+		return "", err
+	}
+	err = a.SaveProviderKey("anthropic", key)
+	if err != nil {
+		return "", fmt.Errorf("failed to save key: %v", err)
+	}
+	return key, nil
 }
 
 func (a *App) GetRecentDirectories() []string {

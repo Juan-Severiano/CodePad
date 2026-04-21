@@ -1,3 +1,24 @@
+export namespace config {
+	
+	export class ModelInfo {
+	    id: string;
+	    label: string;
+	    provider: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.label = source["label"];
+	        this.provider = source["provider"];
+	    }
+	}
+
+}
+
 export namespace session {
 	
 	export class Message {

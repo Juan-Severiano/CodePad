@@ -38,11 +38,13 @@ type StreamOptions struct {
 }
 
 type StreamEvent struct {
-	Type    string          // "text" | "tool_use" | "tool_result" | "done" | "error"
-	Content string          // for text events
-	ToolUse *ToolUseEvent   // for tool_use events
-	Usage   *Usage          // for done event
-	Error   string          // for error event
+	Type     string        // "text" | "tool_use" | "usage" | "done" | "error"
+	Content  string        // for text events; also raw tool input JSON for tool_use
+	ToolID   string        // for tool_use events
+	ToolName string        // for tool_use events
+	ToolUse  *ToolUseEvent // for tool_use events (structured)
+	Usage    *Usage        // for usage / done events
+	Error    string        // for error events
 }
 
 type ToolUseEvent struct {

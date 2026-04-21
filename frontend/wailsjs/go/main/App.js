@@ -6,8 +6,16 @@ export function CancelSession(arg1) {
   return window['go']['main']['App']['CancelSession'](arg1);
 }
 
+export function CheckoutGitBranch(arg1, arg2) {
+  return window['go']['main']['App']['CheckoutGitBranch'](arg1, arg2);
+}
+
 export function ConnectMCP(arg1, arg2, arg3) {
   return window['go']['main']['App']['ConnectMCP'](arg1, arg2, arg3);
+}
+
+export function CreateGitBranch(arg1, arg2) {
+  return window['go']['main']['App']['CreateGitBranch'](arg1, arg2);
 }
 
 export function CreateGitWorktree(arg1, arg2, arg3) {
@@ -34,12 +42,28 @@ export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
 }
 
+export function GetAuthStatus() {
+  return window['go']['main']['App']['GetAuthStatus']();
+}
+
+export function GetAvailableModels() {
+  return window['go']['main']['App']['GetAvailableModels']();
+}
+
 export function GetGitBranch(arg1) {
   return window['go']['main']['App']['GetGitBranch'](arg1);
 }
 
+export function GetGitBranches(arg1) {
+  return window['go']['main']['App']['GetGitBranches'](arg1);
+}
+
 export function GetProjects() {
   return window['go']['main']['App']['GetProjects']();
+}
+
+export function GetProviderKeys() {
+  return window['go']['main']['App']['GetProviderKeys']();
 }
 
 export function GetRecentDirectories() {
@@ -62,12 +86,20 @@ export function ListDirectory(arg1) {
   return window['go']['main']['App']['ListDirectory'](arg1);
 }
 
+export function LoginWithClaude() {
+  return window['go']['main']['App']['LoginWithClaude']();
+}
+
 export function OpenInEditor(arg1, arg2) {
   return window['go']['main']['App']['OpenInEditor'](arg1, arg2);
 }
 
 export function PickDirectory() {
   return window['go']['main']['App']['PickDirectory']();
+}
+
+export function PickImage() {
+  return window['go']['main']['App']['PickImage']();
 }
 
 export function ReadFileContent(arg1) {
@@ -84,6 +116,10 @@ export function RestoreFile(arg1, arg2) {
 
 export function ResumeSession(arg1) {
   return window['go']['main']['App']['ResumeSession'](arg1);
+}
+
+export function SaveProviderKey(arg1, arg2) {
+  return window['go']['main']['App']['SaveProviderKey'](arg1, arg2);
 }
 
 export function SaveSettings(arg1) {
@@ -108,6 +144,10 @@ export function SpawnPTY(arg1, arg2) {
 
 export function StartAgentLoop(arg1, arg2, arg3) {
   return window['go']['main']['App']['StartAgentLoop'](arg1, arg2, arg3);
+}
+
+export function TestProviderConnection(arg1) {
+  return window['go']['main']['App']['TestProviderConnection'](arg1);
 }
 
 export function WritePTY(arg1, arg2) {

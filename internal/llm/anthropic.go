@@ -11,38 +11,65 @@ import (
 	"strings"
 )
 
+const defaultAnthropicBase = "https://api.anthropic.com"
+const defaultAnthropicModel = "claude-sonnet-4-6"
+
 type AnthropicProvider struct {
-	apiKey string
-	model  string
+	apiKey  string
+	baseURL string // e.g. "https://api.anthropic.com" or custom proxy
+	model   string
 }
 
+// NewAnthropicProvider creates a provider with default base URL.
 func NewAnthropicProvider(apiKey, model string) *AnthropicProvider {
+	return NewAnthropicProviderFull(apiKey, "", model)
+}
+
+// NewAnthropicProviderFull creates a provider with explicit base URL.
+// baseURL defaults to "https://api.anthropic.com" if empty.
+func NewAnthropicProviderFull(apiKey, baseURL, model string) *AnthropicProvider {
 	if model == "" {
-		model = "claude-3-5-sonnet-20241022"
+		model = defaultAnthropicModel
 	}
-	return &AnthropicProvider{apiKey: apiKey, model: model}
+	if baseURL == "" {
+		baseURL = defaultAnthropicBase
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &AnthropicProvider{apiKey: apiKey, baseURL: baseURL, model: model}
+}
+
+// setAuthHeaders sets the correct auth header.
+// API keys start with "sk-ant-"; other values are treated as Bearer tokens
+// (e.g. Claude CLI OAuth tokens or gateway keys).
+func (p *AnthropicProvider) setAuthHeaders(req *http.Request) {
+	if p.apiKey != "" {
+		req.Header.Set("x-api-key", p.apiKey)
+		// We can also set Authorization Bearer for gateways, but x-api-key is strictly required by anthropic.
+		if !strings.HasPrefix(p.apiKey, "sk-ant-") && !strings.HasPrefix(p.apiKey, "sk-") {
+			req.Header.Set("Authorization", "Bearer "+p.apiKey)
+		}
+	}
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("content-type", "application/json")
 }
 
 func (p *AnthropicProvider) TestConnection() error {
-	client := &http.Client{}
-	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewBuffer([]byte(`{
-		"model": "claude-3-5-sonnet-20241022",
-		"max_tokens": 100,
-		"messages": [{"role": "user", "content": "Hi"}]
-	}`)))
-	req.Header.Set("x-api-key", p.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-	req.Header.Set("content-type", "application/json")
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":"Hi"}]}`)
+	req, err := http.NewRequest("POST", p.baseURL+"/v1/messages", bytes.NewBuffer(body))
+	if err != nil {
+		return err
+	}
+	p.setAuthHeaders(req)
 
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("anthropic API error: %s", string(body))
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(raw))
 	}
 	return nil
 }
@@ -53,11 +80,20 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, messages []Message, 
 	go func() {
 		defer close(eventChan)
 
-		// Build request body
+		model := opts.Model
+		if model == "" {
+			model = p.model
+		}
+		maxTokens := opts.MaxTokens
+		if maxTokens == 0 {
+			maxTokens = 8192
+		}
+
 		reqBody := map[string]interface{}{
-			"model":       opts.Model,
-			"max_tokens":  opts.MaxTokens,
-			"messages":    messages,
+			"model":      model,
+			"max_tokens": maxTokens,
+			"messages":   messages,
+			"stream":     true,
 		}
 
 		if opts.SystemPrompt != "" {
@@ -68,8 +104,8 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, messages []Message, 
 			toolsData := make([]map[string]interface{}, len(tools))
 			for i, t := range tools {
 				toolsData[i] = map[string]interface{}{
-					"name":        t.Name,
-					"description": t.Description,
+					"name":         t.Name,
+					"description":  t.Description,
 					"input_schema": t.InputSchema,
 				}
 			}
@@ -80,79 +116,128 @@ func (p *AnthropicProvider) StreamChat(ctx context.Context, messages []Message, 
 			reqBody["temperature"] = opts.Temperature
 		}
 
-		bodyBytes, _ := json.Marshal(reqBody)
-
-		client := &http.Client{}
-		req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewBuffer(bodyBytes))
-		req.Header.Set("x-api-key", p.apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		req.Header.Set("content-type", "application/json")
-		req.Header.Set("stream", "true")
-
-		resp, err := client.Do(req)
+		bodyBytes, err := json.Marshal(reqBody)
 		if err != nil {
+			eventChan <- StreamEvent{Type: "error", Error: err.Error()}
+			return
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/v1/messages", bytes.NewBuffer(bodyBytes))
+		if err != nil {
+			eventChan <- StreamEvent{Type: "error", Error: err.Error()}
+			return
+		}
+		p.setAuthHeaders(req)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return // cancelled
+			}
 			eventChan <- StreamEvent{Type: "error", Error: err.Error()}
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			eventChan <- StreamEvent{Type: "error", Error: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))}
+			raw, _ := io.ReadAll(resp.Body)
+			eventChan <- StreamEvent{Type: "error", Error: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(raw))}
 			return
 		}
 
-		// Parse SSE stream
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
+		// Track tool_use accumulation across blocks
+		type toolAccum struct {
+			id    string
+			name  string
+			input strings.Builder
+		}
+		var currentTool *toolAccum
 
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
 
 			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				break
+			}
 
-			var event map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
+			var ev map[string]interface{}
+			if err := json.Unmarshal([]byte(data), &ev); err != nil {
 				continue
 			}
 
-			eventType, ok := event["type"].(string)
-			if !ok {
-				continue
-			}
+			evType, _ := ev["type"].(string)
+			switch evType {
 
-			switch eventType {
 			case "content_block_start":
-				// Can check content_block type here
-			case "content_block_delta":
-				delta, ok := event["delta"].(map[string]interface{})
-				if !ok {
-					continue
-				}
-				deltaType, ok := delta["type"].(string)
-				if !ok {
-					continue
-				}
-
-				if deltaType == "text_delta" {
-					if text, ok := delta["text"].(string); ok {
-						eventChan <- StreamEvent{Type: "text", Content: text}
+				cb, _ := ev["content_block"].(map[string]interface{})
+				if cbType, _ := cb["type"].(string); cbType == "tool_use" {
+					currentTool = &toolAccum{
+						id:   cb["id"].(string),
+						name: cb["name"].(string),
 					}
 				}
 
+			case "content_block_delta":
+				delta, _ := ev["delta"].(map[string]interface{})
+				deltaType, _ := delta["type"].(string)
+
+				switch deltaType {
+				case "text_delta":
+					if text, ok := delta["text"].(string); ok {
+						eventChan <- StreamEvent{Type: "text", Content: text}
+					}
+				case "input_json_delta":
+					if currentTool != nil {
+						if partial, ok := delta["partial_json"].(string); ok {
+							currentTool.input.WriteString(partial)
+						}
+					}
+				}
+
+			case "content_block_stop":
+				if currentTool != nil {
+					eventChan <- StreamEvent{
+						Type:    "tool_use",
+						ToolID:  currentTool.id,
+						ToolName: currentTool.name,
+						Content: currentTool.input.String(),
+					}
+					currentTool = nil
+				}
+
 			case "message_delta":
-				usage, ok := event["usage"].(map[string]interface{})
-				if ok {
-					input, _ := usage["input_tokens"].(float64)
-					output, _ := usage["output_tokens"].(float64)
+				usage, _ := ev["usage"].(map[string]interface{})
+				if usage != nil {
+					out, _ := usage["output_tokens"].(float64)
+					// input_tokens is on message_start, not message_delta
 					eventChan <- StreamEvent{
 						Type: "done",
 						Usage: &Usage{
-							InputTokens:  int(input),
-							OutputTokens: int(output),
+							OutputTokens: int(out),
 						},
+					}
+				}
+
+			case "message_start":
+				msg, _ := ev["message"].(map[string]interface{})
+				if usage, _ := msg["usage"].(map[string]interface{}); usage != nil {
+					in, _ := usage["input_tokens"].(float64)
+					eventChan <- StreamEvent{
+						Type: "usage",
+						Usage: &Usage{InputTokens: int(in)},
 					}
 				}
 			}

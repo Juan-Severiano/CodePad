@@ -4,7 +4,9 @@
       "Bash(go mod *)",
       "Bash(go build *)",
       "Bash(npm run *)",
-      "Bash(wails dev *)"
+      "Bash(wails dev *)",
+      "Bash(rtk npm *)",
+      "Bash(rtk ls *)"
     ]
   }
 }
